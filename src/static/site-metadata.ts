@@ -26,7 +26,7 @@ const data: ISiteMetadataResult = {
     },
     {
       name: 'Workouts Page',
-      url: 'https://doodle1129.github.io/workouts_page/',
+      url: 'https://doodle1129.github.io/workouts_pages/',
     },
     {
       name: 'About',
