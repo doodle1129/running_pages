@@ -26,9 +26,9 @@ import {
   MAP_HEIGHT,
   PRIVACY_MODE,
   LIGHTS_ON,
-  MAP_TILE_STYLE,
   MAP_TILE_VENDOR,
   MAP_TILE_ACCESS_TOKEN,
+  getRuntimeSingleRunColor,
 } from '@/utils/const';
 import {
   Coordinate,
@@ -45,6 +45,7 @@ import { FeatureCollection } from 'geojson';
 import { RPGeometry } from '@/static/run_countries';
 import './mapbox.css';
 import LightsControl from '@/components/RunMap/LightsControl';
+import { useMapTheme, useThemeChangeCounter } from '@/hooks/useTheme';
 
 interface IRunMapProps {
   title: string;
@@ -66,19 +67,131 @@ const RunMap = ({
   animationTrigger,
 }: IRunMapProps) => {
   const { countries, provinces } = useActivities();
-  const mapRef = useRef<MapRef>();
+  const mapRef = useRef<MapRef>(null);
   const [lights, setLights] = useState(PRIVACY_MODE ? false : LIGHTS_ON);
   // layers that should remain visible when lights are off
   const keepWhenLightsOff = ['runs2', 'animated-run'];
   const [mapGeoData, setMapGeoData] =
     useState<FeatureCollection<RPGeometry> | null>(null);
   const [isLoadingMapData, setIsLoadingMapData] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
 
-  // Memoize map style to prevent recreating it on every render
-  const mapStyle = useMemo(
-    () => getMapStyle(MAP_TILE_VENDOR, MAP_TILE_STYLE, MAP_TILE_ACCESS_TOKEN),
-    []
+  // Use the map theme hook to get the current map theme
+  const currentMapTheme = useMapTheme();
+  // Listen for theme changes to update single run color
+  const themeChangeCounter = useThemeChangeCounter();
+
+  // Get theme-aware single run color that updates when theme changes
+  const singleRunColor = useMemo(
+    () => getRuntimeSingleRunColor(),
+    [themeChangeCounter]
   );
+
+  // Generate map style based on current theme
+  const mapStyle = useMemo(
+    () => getMapStyle(MAP_TILE_VENDOR, currentMapTheme, MAP_TILE_ACCESS_TOKEN),
+    [currentMapTheme]
+  );
+
+  // Mapbox GL JS requires a token even when using other vendors
+  // Use actual MAPBOX_TOKEN when vendor is 'mapbox', otherwise use a dummy token
+  const mapboxAccessToken = useMemo(() => {
+    if (MAP_TILE_VENDOR === 'mapbox') {
+      return MAPBOX_TOKEN;
+    }
+    // Use a dummy token for other vendors (Mapbox GL JS still requires a token)
+    // This is a valid format but won't be used for actual mapbox requests
+    return 'pk.eyJ1IjoidW5rbm93biIsImEiOiJjbGZqY2N0d3EwMGNsM3BwN2N4d2N4d2N4In0.unknown';
+  }, []);
+
+  // Update map when theme changes
+  useEffect(() => {
+    if (mapRef.current) {
+      const map = mapRef.current.getMap();
+
+      // Save current map state before changing style
+      const currentCenter = map.getCenter();
+      const currentZoom = map.getZoom();
+      const currentBearing = map.getBearing();
+      const currentPitch = map.getPitch();
+
+      // Apply new style
+      map.setStyle(mapStyle);
+
+      // Create a stable handler for style.load to ensure proper cleanup
+      const handleStyleLoad = () => {
+        // Add a small delay to ensure style is fully loaded
+        setTimeout(() => {
+          try {
+            // Restore map view state
+            map.setCenter(currentCenter);
+            map.setZoom(currentZoom);
+            map.setBearing(currentBearing);
+            map.setPitch(currentPitch);
+
+            // Reapply layer visibility settings with current lights state
+            switchLayerVisibility(map, lights);
+          } catch (error) {
+            console.warn('Error applying map style changes:', error);
+          }
+        }, 100);
+      };
+
+      // Use once to automatically remove the listener after it fires
+      map.once('style.load', handleStyleLoad);
+    }
+  }, [mapStyle]); // Keep only mapStyle in dependency to prevent excessive re-renders
+
+  useEffect(() => {
+    if (mapRef.current) {
+      const map = mapRef.current.getMap();
+
+      // Track tile loading errors
+      let tileErrorCount = 0;
+      const MAX_TILE_ERRORS = 10;
+
+      const handleStyleError = (e: any) => {
+        console.error('❌ Map style failed to load:', e);
+        setMapError(
+          'Map tiles failed to load. Please check your internet connection.'
+        );
+
+        if (MAP_TILE_VENDOR === 'mapcn') {
+          console.warn('⚠️ Carto Basemaps (MapCN) failed to load.');
+          console.info('💡 Possible solutions:');
+          console.info('   1. Check your internet connection');
+          console.info(
+            '   2. If in China, Carto may be blocked.  Try fallback:'
+          );
+          console.info('      - Change MAP_TILE_VENDOR to "mapcn_openfreemap"');
+          console.info(
+            '      - Or use MAP_TILE_VENDOR = "maptiler" with free token'
+          );
+        }
+      };
+
+      const handleTileError = () => {
+        tileErrorCount++;
+
+        if (tileErrorCount === MAX_TILE_ERRORS) {
+          console.error(`❌ ${MAX_TILE_ERRORS}+ tile loading errors detected`);
+          console.warn('⚠️ Map tiles are not loading properly.');
+          console.info(
+            '💡 Try switching to a different provider in src/utils/const.ts'
+          );
+        }
+      };
+
+      map.on('error', handleStyleError);
+      map.on('tileerror', handleTileError);
+
+      // Cleanup
+      return () => {
+        map.off('error', handleStyleError);
+        map.off('tileerror', handleTileError);
+      };
+    }
+  }, [mapRef]);
 
   // animation state (single run only)
   const [animatedPoints, setAnimatedPoints] = useState<Coordinate[]>([]);
@@ -98,6 +211,11 @@ const RunMap = ({
     return filtered;
   }, [countries]);
 
+  /**
+   * Toggle visibility of map layers based on lights setting
+   * @param map - The Mapbox map instance
+   * @param lights - Whether lights are on or off
+   */
   function switchLayerVisibility(map: MapInstance, lights: boolean) {
     const styleJson = map.getStyle();
     styleJson.layers.forEach((it: { id: string }) => {
@@ -107,6 +225,22 @@ const RunMap = ({
       }
     });
   }
+
+  // Apply layer visibility when lights setting changes
+  useEffect(() => {
+    if (mapRef.current) {
+      const map = mapRef.current.getMap();
+      // Add a small delay to ensure map is ready
+      setTimeout(() => {
+        try {
+          switchLayerVisibility(map, lights);
+        } catch (error) {
+          console.warn('Error switching layer visibility:', error);
+        }
+      }, 50);
+    }
+  }, [lights]);
+
   const mapRefCallback = useCallback(
     (ref: MapRef) => {
       if (ref !== null) {
@@ -299,8 +433,21 @@ const RunMap = ({
       mapStyle={mapStyle}
       ref={mapRefCallback}
       cooperativeGestures={isTouchDevice()}
-      mapboxAccessToken={MAPBOX_TOKEN}
+      mapboxAccessToken={mapboxAccessToken}
     >
+      {mapError && (
+        <div className={styles.mapErrorNotification}>
+          <span>⚠️ {mapError}</span>
+          <button onClick={() => window.location.reload()}>Reload Page</button>
+          <a
+            href="https://github.com/yihong0618/running_page#map-tiles-customization"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Troubleshooting Guide
+          </a>
+        </div>
+      )}
       <RunMapButtons changeYear={changeYear} thisYear={thisYear} />
       <Source id="data" type="geojson" data={combinedGeoData}>
         <Layer
@@ -347,7 +494,7 @@ const RunMap = ({
             features: [
               {
                 type: 'Feature',
-                properties: { color: '#ff4d4f' },
+                properties: { color: singleRunColor },
                 geometry: {
                   type: 'LineString',
                   coordinates: animatedPoints,

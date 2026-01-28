@@ -1,5 +1,6 @@
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { Analytics } from '@vercel/analytics/react';
+import { Helmet } from 'react-helmet-async';
 import Layout from '@/components/Layout';
 import LocationStat from '@/components/LocationStat';
 import RunMap from '@/components/RunMap';
@@ -24,10 +25,12 @@ import {
   titleForShow,
   RunIds,
 } from '@/utils/utils';
+import { useTheme, useThemeChangeCounter } from '@/hooks/useTheme';
 
 const Index = () => {
-  const { siteTitle } = useSiteMetadata();
+  const { siteTitle, siteUrl } = useSiteMetadata();
   const { activities, thisYear } = useActivities();
+  const themeChangeCounter = useThemeChangeCounter();
   const [year, setYear] = useState(thisYear);
   const [runIndex, setRunIndex] = useState(-1);
   const [title, setTitle] = useState('');
@@ -45,6 +48,9 @@ const Index = () => {
 
   // Animation trigger for single runs - increment this to force animation replay
   const [animationTrigger, setAnimationTrigger] = useState(0);
+
+  const selectedRunIdRef = useRef<number | null>(null);
+  const selectedRunDateRef = useRef<string | null>(null);
 
   // Parse URL hash on mount to check for run ID
   useEffect(() => {
@@ -89,7 +95,7 @@ const Index = () => {
 
   const geoData = useMemo(() => {
     return geoJsonForRuns(runs);
-  }, [runs]);
+  }, [runs, themeChangeCounter]);
 
   // for auto zoom
   const bounds = useMemo(() => {
@@ -274,13 +280,16 @@ const Index = () => {
   );
 
   // Auto locate activity when singleRunId is set and activities are loaded
+  // First, detect the run's year and switch to it if needed
   useEffect(() => {
     if (singleRunId !== null && activities.length > 0) {
-      // Check if the run exists in our activities
-      const runExists = activities.some((run) => run.run_id === singleRunId);
-      if (runExists) {
-        // Automatically simulate clicking the single run
-        locateActivity([singleRunId]);
+      const targetRun = activities.find((run) => run.run_id === singleRunId);
+      if (targetRun) {
+        const runYear = targetRun.start_date_local.slice(0, 4);
+        if (year !== runYear) {
+          setYear(runYear);
+          setCurrentFilter({ item: runYear, func: filterYearRuns });
+        }
       } else {
         // If run doesn't exist, clear the hash and show a warning
         console.warn(`Run with ID ${singleRunId} not found in activities`);
@@ -288,20 +297,35 @@ const Index = () => {
         setSingleRunId(null);
       }
     }
-  }, [singleRunId, activities, locateActivity]);
+  }, [singleRunId, activities]);
+
+  useEffect(() => {
+    if (singleRunId !== null && runs.length > 0) {
+      const runExistsInCurrentRuns = runs.some(
+        (run) => run.run_id === singleRunId
+      );
+      if (runExistsInCurrentRuns) {
+        locateActivity([singleRunId]);
+      }
+    }
+  }, [runs, singleRunId, locateActivity]);
 
   // Update bounds when geoData changes
   useEffect(() => {
-    setViewState((prev) => ({
-      ...prev,
-      ...bounds,
-    }));
-  }, [bounds]);
+    if (singleRunId === null) {
+      setViewState((prev) => ({
+        ...prev,
+        ...bounds,
+      }));
+    }
+  }, [bounds, singleRunId]);
 
   // Animate geoData when runs change
   useEffect(() => {
-    startAnimation(runs);
-  }, [runs, startAnimation]);
+    if (singleRunId === null) {
+      startAnimation(runs);
+    }
+  }, [runs, startAnimation, singleRunId]);
 
   useEffect(() => {
     if (year !== 'Total') {
@@ -324,7 +348,13 @@ const Index = () => {
           if (!runId) {
             return;
           }
-          locateActivity([runId]);
+          if (selectedRunIdRef.current === runId) {
+            selectedRunIdRef.current = null;
+            locateActivity(runs.map((r) => r.run_id));
+          } else {
+            selectedRunIdRef.current = runId;
+            locateActivity([runId]);
+          }
           return;
         }
 
@@ -340,7 +370,13 @@ const Index = () => {
           if (!runIDsOnDate.length) {
             return;
           }
-          locateActivity(runIDsOnDate);
+          if (selectedRunDateRef.current === runDate) {
+            selectedRunDateRef.current = null;
+            locateActivity(runs.map((r) => r.run_id));
+          } else {
+            selectedRunDateRef.current = runDate;
+            locateActivity(runIDsOnDate);
+          }
         }
       }
     };
@@ -350,11 +386,16 @@ const Index = () => {
     };
   }, [year]);
 
+  const { theme } = useTheme();
+
   return (
     <Layout>
+      <Helmet>
+        <html lang="en" data-theme={theme} />
+      </Helmet>
       <div className="w-full lg:w-1/3">
         <h1 className="my-12 mt-6 text-5xl font-extrabold italic">
-          <a href="/">{siteTitle}</a>
+          <a href={siteUrl}>{siteTitle}</a>
         </h1>
         {(viewState.zoom ?? 0) <= 3 && IS_CHINESE ? (
           <LocationStat
